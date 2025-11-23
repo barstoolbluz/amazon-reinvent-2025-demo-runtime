@@ -1,0 +1,465 @@
+version = 1
+
+[install]
+# tools
+kubectl.pkg-path = "kubectl"
+gum.pkg-path = "gum"
+awscli2.pkg-path = "awscli2"
+
+# custom packages
+ticket-generator.pkg-path = "flox/reinvent-demo-ticket-generator"
+ticket-generator.priority = 6
+ticket-processor.pkg-path = "flox/reinvent-demo-ticket-processor"
+ticket-processor.priority = 4
+
+# python runtime
+python3.pkg-path = "python313Full"
+python3.priority = 1
+
+
+# pytorch variants
+pytorch.pkg-path = "python313Packages.pytorch"
+pytorch.systems = ["aarch64-darwin", "x86_64-darwin"]
+pytorch.priority = 3
+
+pytorch-armv8.pkg-path = "flox/pytorch-python313-cpu-armv8_2"
+pytorch-armv8.pkg-group = "aarch64-linux-pytorch-armv8_2"
+pytorch-armv8.systems = ["aarch64-linux"]
+pytorch-armv8.priority = 4
+
+pytorch-armv9.pkg-path = "flox/pytorch-python313-cpu-armv9"
+pytorch-armv9.pkg-group = "aarch64-linux-pytorch"
+pytorch-armv9.systems = ["aarch64-linux"]
+pytorch-armv9.priority = 3
+
+pytorch-avx2.pkg-path = "flox/pytorch-python313-cpu-avx2"
+pytorch-avx2.pkg-group = "x86_64-linux-pytorch-avx2"
+pytorch-avx2.systems = ["x86_64-linux"]
+pytorch-avx2.priority = 4
+
+pytorch-avx512.pkg-path = "flox/pytorch-python313-cpu-avx512"
+pytorch-avx512.pkg-group = "x86_64-linux-pytorch-avx512"
+pytorch-avx512.systems = ["x86_64-linux"]
+pytorch-avx512.priority = 3
+
+
+# torchvision variants
+torchvision.pkg-path = "python313Packages.torchvision"
+torchvision.systems = ["x86_64-darwin", "aarch64-darwin"]
+torchvision.priority = 4
+
+torchvision-armv9.pkg-path = "flox/torchvision-python313-cpu-armv9"
+torchvision-armv9.pkg-group = "aarch64-linux-torchvision"
+torchvision-armv9.systems = ["aarch64-linux"]
+torchvision-armv9.priority = 4
+
+torchvision-avx2.pkg-path = "flox/torchvision-python313-cpu-avx2"
+torchvision-avx2.pkg-group = "x86_64-linux-torchvision-avx2"
+torchvision-avx2.systems = ["x86_64-linux"]
+torchvision-avx2.priority = 5
+
+torchvision-avx512.pkg-path = "flox/torchvision-python313-cpu-avx512"
+torchvision-avx512.pkg-group = "x86_64-linux-torchvision-avx512"
+torchvision-avx512.systems = ["x86_64-linux"]
+torchvision-avx512.priority = 4
+
+# ML/NLP libraries
+transformers.pkg-path = "python313Packages.transformers"
+sentence-transformers.pkg-path = "python313Packages.sentence-transformers"
+tokenizers.pkg-path = "python313Packages.tokenizers"
+
+# AWS SDK
+boto3.pkg-path = "python313Packages.boto3"
+botocore.pkg-path = "python313Packages.botocore"
+
+# Utilities
+pydantic.pkg-path = "python313Packages.pydantic"
+pytest.pkg-path = "python313Packages.pytest"
+
+[services]
+  ticket-generator.command = '''
+    # Activate venv for awslocal access
+    source "$PYTHON_DIR/bin/activate"
+
+    # Wait for S3 bucket to exist before starting
+    for i in {1..30}; do
+      if awslocal s3 ls s3://tickets-raw >/dev/null 2>&1; then
+        echo "✅ S3 bucket ready, starting ticket generator..."
+        break
+      fi
+      echo "⏳ Waiting for LocalStack resources... ($i/30)"
+      sleep 2
+    done
+
+    exec ticket-generator
+  '''
+  ticket-generator.is-daemon = true
+  ticket-generator.shutdown.command = "pkill -f 'ticket-generator' || true"
+
+  ticket-processor.command = '''
+    # Activate venv for awslocal access
+    source "$PYTHON_DIR/bin/activate"
+
+    # Wait for SQS queue to exist before starting
+    for i in {1..30}; do
+      if awslocal sqs get-queue-url --queue-name ticket-processing-queue >/dev/null 2>&1; then
+        echo "✅ SQS queue ready, starting ticket processor..."
+        break
+      fi
+      echo "⏳ Waiting for LocalStack resources... ($i/30)"
+      sleep 2
+    done
+
+    exec ticket-processor
+  '''
+  ticket-processor.is-daemon = true
+  ticket-processor.shutdown.command = "pkill -f 'ticket-processor' || true"
+
+
+[include]
+environments = [
+#    { remote = "barstoolbluz/reinvent-demo-ticket-generator" },
+#    { remote = "barstoolbluz/reinvent-demo-ticket-processor" },
+    { remote = "flox/localstack"}
+]
+
+[vars]
+# LocalStack
+AWSCLILOCAL_PACKAGE="awscli-local"
+USE_LOCALSTACK="true"
+AWS_ENDPOINT_URL="http://localhost:4566"
+AWS_REGION="us-east-1"
+AWS_ACCESS_KEY_ID="test"
+AWS_SECRET_ACCESS_KEY="test"
+
+# ML Model caching
+MODEL_CACHE_DIR="$FLOX_ENV_CACHE/models"
+TRANSFORMERS_CACHE="$FLOX_ENV_CACHE/models/transformers"
+HF_HOME="$FLOX_ENV_CACHE/models/huggingface"
+
+# Python
+PYTHONUNBUFFERED="1"
+
+[hook]
+on-activate = '''
+# Make a spinner we can skip this in CI
+function with_spinner() {
+  if [[ "$FLOX_ENVS_TESTING" == "1" ]]; then
+    bash -c "$2"
+  else
+    gum spin \
+      --show-error \
+      --spinner line \
+      --title "$1" \
+        -- bash -c "$2"
+  fi
+}
+
+# Create cache directories
+mkdir -p "$FLOX_ENV_CACHE/models/"{transformers,huggingface}
+mkdir -p "$FLOX_ENV_CACHE/localstack"
+
+# Make a venv
+export PYTHON_DIR="$FLOX_ENV_CACHE/python"
+if [ ! -d "$PYTHON_DIR" ]; then
+  with_spinner "Creating venv in $PYTHON_DIR..." "python -m venv \"$PYTHON_DIR\""
+  echo "✅ Created venv"
+fi
+
+(
+  source "$PYTHON_DIR/bin/activate"
+  with_spinner "Installing $AWSCLILOCAL_PACKAGE..." "pip install $AWSCLILOCAL_PACKAGE"
+  echo "✅ Installed $AWSCLILOCAL_PACKAGE"
+)
+
+if [[ "$FLOX_ACTIVATE_START_SERVICES" == "true" ]]; then
+  gum style --border double --margin "1 2" --padding "1 4" \
+    'Localstack may take a few moments to start.' '' \
+    'Once it starts, see available services with:' \
+    '  localstack status services'
+else
+  gum style --border double --margin "1 2" --padding "1 4" \
+    'You may need to start localstack using:' \
+    '  flox services start'
+fi
+'''
+
+[profile]
+bash = '''
+source "$PYTHON_DIR/bin/activate"
+
+# Wait for LocalStack and setup resources (only if services were started)
+if [[ "$FLOX_ACTIVATE_START_SERVICES" == "true" ]]; then
+  # Quick check: do resources already exist? (idempotent - skip if already setup)
+  if awslocal sqs get-queue-url --queue-name ticket-processing-queue >/dev/null 2>&1; then
+    echo "✅ LocalStack resources already configured"
+  else
+    # Resources missing - wait for LocalStack to be ready
+    echo "⏳ Waiting for LocalStack to be ready..."
+
+    for i in {1..60}; do
+      if curl -sf http://localhost:4566/_localstack/health >/dev/null 2>&1; then
+        echo "✅ LocalStack is responding"
+        sleep 2  # Grace period for services to fully initialize
+
+        # Initialize resources
+        echo "🔧 Setting up LocalStack resources..."
+        if [ -f "Makefile" ]; then
+          make setup 2>&1 | grep -E "(✓|✗|Error)" || true
+          make seed 2>&1 | grep -E "(✓|✗|Uploaded)" || true
+          echo "✅ Resources configured"
+        elif [ -f "$FLOX_ENV/share/setup/Makefile" ]; then
+          cd "$FLOX_ENV/share/setup"
+          make setup 2>&1 | grep -E "(✓|✗|Error)" || true
+          make seed 2>&1 | grep -E "(✓|✗|Uploaded)" || true
+          cd "$FLOX_ENV_PROJECT"
+          echo "✅ Resources configured"
+        else
+          echo "⚠️  No Makefile found - skipping setup"
+        fi
+        break
+      fi
+
+      if [ $i -eq 60 ]; then
+        echo "⚠️  LocalStack health check timed out after 60 seconds"
+      fi
+      sleep 1
+    done
+  fi
+fi
+
+# Helper functions for demo
+run-processor() {
+  echo "🚀 Starting ML ticket processor..."
+  python -m src.processor.worker
+}
+
+show-results() {
+  echo "📊 Enriched Tickets in S3:"
+  awslocal s3 ls s3://tickets-enriched/ | head -10
+  echo ""
+  echo "📝 Sample enriched ticket:"
+  local ticket=$(awslocal s3 ls s3://tickets-enriched/ | head -1 | awk '{print $4}')
+  if [ -n "$ticket" ]; then
+    awslocal s3 cp s3://tickets-enriched/$ticket - | python -m json.tool | head -40
+  fi
+}
+
+show-sentiment() {
+  local sentiment=${1:-NEGATIVE}
+  echo "😊 Tickets with sentiment: $sentiment"
+  awslocal dynamodb scan \
+    --table-name tickets-metadata \
+    --filter-expression "sentiment = :s" \
+    --expression-attribute-values "{\":s\":{\"S\":\"$sentiment\"}}" \
+    --output json | python -c "
+import sys, json
+data = json.load(sys.stdin)
+for item in data.get('Items', []):
+    ticket_id = item['ticket_id']['S']
+    intent = item['intent']['S']
+    urgency = item['urgency']['S']
+    summary = item['summary']['S']
+    print(f'{ticket_id}: {intent} ({urgency}) - {summary[:60]}...')
+" 2>/dev/null || echo "No tickets found with sentiment: $sentiment"
+}
+
+show-urgent() {
+  echo "🚨 Critical/High Urgency Tickets:"
+  awslocal dynamodb scan \
+    --table-name tickets-metadata \
+    --filter-expression "urgency IN (:c, :h)" \
+    --expression-attribute-values '{":c":{"S":"critical"},":h":{"S":"high"}}' \
+    --output json | python -c "
+import sys, json
+data = json.load(sys.stdin)
+for item in data.get('Items', []):
+    ticket_id = item['ticket_id']['S']
+    urgency = item['urgency']['S']
+    intent = item['intent']['S']
+    sentiment = item['sentiment']['S']
+    print(f'{ticket_id}: [{urgency.upper()}] {intent} (sentiment: {sentiment})')
+" 2>/dev/null || echo "No urgent tickets found"
+}
+
+demo() {
+  echo "🎬 Running ML Ticket Processing Demo"
+  echo "===================================="
+  echo ""
+  echo "1️⃣  Checking LocalStack status..."
+  make status 2>/dev/null || echo "LocalStack running"
+  echo ""
+  echo "2️⃣  Running processor on sample tickets..."
+  timeout 30 python -m src.processor.worker 2>/dev/null || echo "Processed tickets (or already done)"
+  echo ""
+  echo "3️⃣  Showing results..."
+  show-results
+  echo ""
+  echo "4️⃣  Negative sentiment tickets:"
+  show-sentiment NEGATIVE
+  echo ""
+  echo "5️⃣  Urgent tickets:"
+  show-urgent
+  echo ""
+  echo "✅ Demo complete!"
+  echo ""
+  echo "Available commands:"
+  echo "  run-processor    - Run the ML processor"
+  echo "  show-results     - View enriched tickets"
+  echo "  show-sentiment   - Query by sentiment (POSITIVE/NEGATIVE/NEUTRAL)"
+  echo "  show-urgent      - Show critical/high urgency tickets"
+  echo "  demo             - Run this demo again"
+}
+'''
+fish = '''
+source "$PYTHON_DIR/bin/activate.fish"
+
+# Wait for LocalStack (fish syntax - idempotent version)
+if test "$FLOX_ACTIVATE_START_SERVICES" = "true"
+  # Quick check: do resources already exist?
+  if awslocal sqs get-queue-url --queue-name ticket-processing-queue >/dev/null 2>&1
+    echo "✅ LocalStack resources already configured"
+  else
+    echo "⏳ Waiting for LocalStack to be ready..."
+    for i in (seq 1 60)
+      if curl -sf http://localhost:4566/_localstack/health >/dev/null 2>&1
+        echo "✅ LocalStack is responding"
+        sleep 2
+        echo "🔧 Setting up LocalStack resources..."
+        test -f "Makefile"; and make setup >/dev/null 2>&1; and make seed >/dev/null 2>&1
+        echo "✅ Resources configured"
+        break
+      end
+      sleep 1
+    end
+  end
+end
+'''
+tcsh = '''
+source "$PYTHON_DIR/bin/activate.csh"
+'''
+zsh = '''
+source "$PYTHON_DIR/bin/activate"
+
+# Wait for LocalStack (same as bash - idempotent version)
+if [[ "$FLOX_ACTIVATE_START_SERVICES" == "true" ]]; then
+  # Quick check: do resources already exist?
+  if awslocal sqs get-queue-url --queue-name ticket-processing-queue >/dev/null 2>&1; then
+    echo "✅ LocalStack resources already configured"
+  else
+    echo "⏳ Waiting for LocalStack to be ready..."
+
+    for i in {1..60}; do
+      if curl -sf http://localhost:4566/_localstack/health >/dev/null 2>&1; then
+        echo "✅ LocalStack is responding"
+        sleep 2
+
+        echo "🔧 Setting up LocalStack resources..."
+        if [ -f "Makefile" ]; then
+          make setup 2>&1 | grep -E "(✓|✗|Error)" || true
+          make seed 2>&1 | grep -E "(✓|✗|Uploaded)" || true
+          echo "✅ Resources configured"
+        elif [ -f "$FLOX_ENV/share/setup/Makefile" ]; then
+          cd "$FLOX_ENV/share/setup"
+          make setup 2>&1 | grep -E "(✓|✗|Error)" || true
+          make seed 2>&1 | grep -E "(✓|✗|Uploaded)" || true
+          cd "$FLOX_ENV_PROJECT"
+          echo "✅ Resources configured"
+        else
+          echo "⚠️  No Makefile found - skipping setup"
+        fi
+        break
+      fi
+      sleep 1
+    done
+  fi
+fi
+
+# Helper functions for demo (same as bash)
+run-processor() {
+  echo "🚀 Starting ML ticket processor..."
+  python -m src.processor.worker
+}
+
+show-results() {
+  echo "📊 Enriched Tickets in S3:"
+  awslocal s3 ls s3://tickets-enriched/ | head -10
+  echo ""
+  echo "📝 Sample enriched ticket:"
+  local ticket=$(awslocal s3 ls s3://tickets-enriched/ | head -1 | awk '{print $4}')
+  if [ -n "$ticket" ]; then
+    awslocal s3 cp s3://tickets-enriched/$ticket - | python -m json.tool | head -40
+  fi
+}
+
+show-sentiment() {
+  local sentiment=${1:-NEGATIVE}
+  echo "😊 Tickets with sentiment: $sentiment"
+  awslocal dynamodb scan \
+    --table-name tickets-metadata \
+    --filter-expression "sentiment = :s" \
+    --expression-attribute-values "{\":s\":{\"S\":\"$sentiment\"}}" \
+    --output json | python -c "
+import sys, json
+data = json.load(sys.stdin)
+for item in data.get('Items', []):
+    ticket_id = item['ticket_id']['S']
+    intent = item['intent']['S']
+    urgency = item['urgency']['S']
+    summary = item['summary']['S']
+    print(f'{ticket_id}: {intent} ({urgency}) - {summary[:60]}...')
+" 2>/dev/null || echo "No tickets found with sentiment: $sentiment"
+}
+
+show-urgent() {
+  echo "🚨 Critical/High Urgency Tickets:"
+  awslocal dynamodb scan \
+    --table-name tickets-metadata \
+    --filter-expression "urgency IN (:c, :h)" \
+    --expression-attribute-values '{":c":{"S":"critical"},":h":{"S":"high"}}' \
+    --output json | python -c "
+import sys, json
+data = json.load(sys.stdin)
+for item in data.get('Items', []):
+    ticket_id = item['ticket_id']['S']
+    urgency = item['urgency']['S']
+    intent = item['intent']['S']
+    sentiment = item['sentiment']['S']
+    print(f'{ticket_id}: [{urgency.upper()}] {intent} (sentiment: {sentiment})')
+" 2>/dev/null || echo "No urgent tickets found"
+}
+
+demo() {
+  echo "🎬 Running ML Ticket Processing Demo"
+  echo "===================================="
+  echo ""
+  echo "1️⃣  Checking LocalStack status..."
+  make status 2>/dev/null || echo "LocalStack running"
+  echo ""
+  echo "2️⃣  Running processor on sample tickets..."
+  timeout 30 python -m src.processor.worker 2>/dev/null || echo "Processed tickets (or already done)"
+  echo ""
+  echo "3️⃣  Showing results..."
+  show-results
+  echo ""
+  echo "4️⃣  Negative sentiment tickets:"
+  show-sentiment NEGATIVE
+  echo ""
+  echo "5️⃣  Urgent tickets:"
+  show-urgent
+  echo ""
+  echo "✅ Demo complete!"
+  echo ""
+  echo "Available commands:"
+  echo "  run-processor    - Run the ML processor"
+  echo "  show-results     - View enriched tickets"
+  echo "  show-sentiment   - Query by sentiment (POSITIVE/NEGATIVE/NEUTRAL)"
+  echo "  show-urgent      - Show critical/high urgency tickets"
+  echo "  demo             - Run this demo again"
+}
+'''
+
+
+[options]
+systems = ["aarch64-darwin", "aarch64-linux", "x86_64-darwin", "x86_64-linux"]
+
